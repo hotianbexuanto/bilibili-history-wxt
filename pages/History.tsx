@@ -7,6 +7,7 @@ import { RefreshCwIcon, ChevronDownIcon, Search, X, Filter, Minus, Plus } from "
 import { DATE_SELECTION_MODE, GRID_COLUMNS } from "../utils/constants";
 import { DateRangePicker } from "../components/DateRangePicker";
 import { getStorageValue, setStorageValue } from "../utils/storage";
+import { isSidepanel } from "../utils/isSidepanel";
 
 export const History: React.FC = () => {
   const [history, setHistory] = useState<HistoryItemType[]>([]);
@@ -25,7 +26,7 @@ export const History: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [totalHistoryCount, setTotalHistoryCount] = useState(0);
   const [dateSelectionMode, setDateSelectionMode] = useState<"range" | "single">("range");
-  const [gridColumns, setGridColumns] = useState(4);
+  const [gridColumns, setGridColumns] = useState(isSidepanel ? 1 : 4);
 
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -42,7 +43,7 @@ export const History: React.FC = () => {
       setDateSelectionMode(mode as "range" | "single");
     });
     getStorageValue<number>(GRID_COLUMNS, 4).then((cols) => {
-      setGridColumns(cols);
+      setGridColumns(isSidepanel ? Math.min(cols, 2) : cols);
     });
   }, []);
 
@@ -311,6 +312,7 @@ export const History: React.FC = () => {
             />
 
             {/* 列数调节 */}
+            {!isSidepanel && (
             <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-full px-1 py-0.5">
               <button
                 onClick={() => handleColumnChange(-1)}
@@ -332,6 +334,7 @@ export const History: React.FC = () => {
                 <Plus className="w-3.5 h-3.5" />
               </button>
             </div>
+            )}
 
             <button
               onClick={() => {

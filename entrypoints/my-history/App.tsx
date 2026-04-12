@@ -2,6 +2,7 @@ import { HashRouter, Routes, Route, Navigate, useLocation } from "react-router-d
 import { History } from "../../pages/History";
 import { About } from "../../pages/About";
 import { Sidebar } from "../../components/Sidebar";
+import { SidepanelNav } from "../../components/SidepanelNav";
 import Settings from "../../pages/Settings";
 import ScrollToTopButton from "../../components/ScrollToTopButton";
 import { Toaster } from "react-hot-toast";
@@ -14,15 +15,17 @@ import { Favorites } from "../../pages/Favorites";
 import Welcome from "../../pages/Welcome";
 import AISearch from "../../pages/AISearch";
 
+import { isSidepanel } from "../../utils/isSidepanel";
+
 const MainLayout = ({ children }: { children: React.ReactNode }) => {
   const location = useLocation();
   const isWelcome = location.pathname === "/welcome";
 
   return (
-    <div className="flex h-screen">
-      {!isWelcome && <Sidebar />}
+    <div className={isSidepanel ? "flex flex-col h-screen" : "flex h-screen"}>
+      {!isWelcome && (isSidepanel ? <SidepanelNav /> : <Sidebar />)}
       {/* 主内容区域 */}
-      <div className={`${!isWelcome ? "ml-40" : ""} w-full transition-all duration-300`}>
+      <div className={`${!isWelcome && !isSidepanel ? "ml-40" : ""} w-full transition-all duration-300`}>
         {children}
       </div>
     </div>

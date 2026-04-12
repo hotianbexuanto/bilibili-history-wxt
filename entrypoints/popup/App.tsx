@@ -81,6 +81,19 @@ function App() {
           打开历史记录页面
         </button>
         <button
+          className="w-full px-2 py-2 border border-[#00a1d6] text-[#00a1d6] bg-white rounded hover:bg-[#00a1d6] hover:text-white disabled:border-gray-300 disabled:text-gray-300 disabled:cursor-not-allowed"
+          onClick={async () => {
+            const currentWindow = await chrome.windows.getCurrent();
+            if (currentWindow.id != null) {
+              await chrome.sidePanel.open({ windowId: currentWindow.id });
+            }
+            window.close();
+          }}
+          disabled={isSyncing}
+        >
+          在侧边栏中打开
+        </button>
+        <button
           className="w-full px-2 py-2 text-white bg-[#00a1d6] rounded hover:bg-[#0091c2] disabled:bg-gray-300 disabled:cursor-not-allowed"
           onClick={handleSync}
           disabled={isSyncing}
