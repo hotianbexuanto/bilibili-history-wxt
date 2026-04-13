@@ -1,6 +1,12 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react";
 import { HistoryItem } from "../components/HistoryItem";
-import { getHistory, getTotalHistoryCount } from "../utils/db";
+import {
+  getFilteredHistoryCount,
+  getHistory,
+  getHistoryDateSummary,
+  getHistoryFromViewAt,
+  HistoryDateSummaryItem,
+} from "../utils/db";
 import { HistoryItem as HistoryItemType } from "../utils/types";
 import { useDebounce } from "use-debounce";
 import { RefreshCwIcon, ChevronDownIcon, Search, X, Filter, Minus, Plus } from "lucide-react";
@@ -8,6 +14,11 @@ import { DATE_SELECTION_MODE, GRID_COLUMNS } from "../utils/constants";
 import { DateRangePicker } from "../components/DateRangePicker";
 import { getStorageValue, setStorageValue } from "../utils/storage";
 import { isSidepanel } from "../utils/isSidepanel";
+import { groupByDate } from "../utils/dateGroup";
+import dayjs from "dayjs";
+import { MiniTimeline } from "../components/MiniTimeline";
+
+const SIDEPANEL_NAV_HEIGHT = 41;
 
 export const History: React.FC = () => {
   const [history, setHistory] = useState<HistoryItemType[]>([]);
@@ -25,18 +36,55 @@ export const History: React.FC = () => {
   const [hasMore, setHasMore] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [totalHistoryCount, setTotalHistoryCount] = useState(0);
+  const [timelineItems, setTimelineItems] = useState<HistoryDateSummaryItem[]>([]);
   const [dateSelectionMode, setDateSelectionMode] = useState<"range" | "single">("range");
   const [gridColumns, setGridColumns] = useState(isSidepanel ? 1 : 4);
+  const [toolbarHeight, setToolbarHeight] = useState(isSidepanel ? 120 : 96);
+  const [isTimelineLoading, setIsTimelineLoading] = useState(false);
 
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
   const isLoadingRef = useRef<boolean>(false);
   const historyRef = useRef<HistoryItemType[]>([]);
   const hasMoreRef = useRef(true);
+  const [activeDateKey, setActiveDateKey] = useState("");
+  const groupRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const headerObserverRef = useRef<IntersectionObserver | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const pendingTimelineJumpRef = useRef<string | null>(null);
+  const isTimelineJumpingRef = useRef(false);
+
+  const dateGroups = useMemo(() => groupByDate(history), [history]);
+  const stickyToolbarTop = isSidepanel ? SIDEPANEL_NAV_HEIGHT : 0;
+  const timelineTopOffset = isSidepanel ? SIDEPANEL_NAV_HEIGHT : toolbarHeight;
+  const groupHeaderTopOffset = isSidepanel ? 0 : timelineTopOffset;
 
   useEffect(() => {
     historyRef.current = history;
   }, [history]);
+
+  useLayoutEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar) return;
+
+    const updateToolbarHeight = () => {
+      setToolbarHeight(toolbar.offsetHeight);
+    };
+
+    updateToolbarHeight();
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateToolbarHeight();
+    });
+
+    resizeObserver.observe(toolbar);
+    window.addEventListener("resize", updateToolbarHeight);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateToolbarHeight);
+    };
+  }, [isSidepanel]);
 
   useEffect(() => {
     getStorageValue(DATE_SELECTION_MODE, "range").then((mode) => {
@@ -110,15 +158,38 @@ export const History: React.FC = () => {
 
   useEffect(() => {
     loadHistory(false);
+    loadTimelineSummary();
+    getFilteredCount();
   }, [debouncedKeyword, startDate, endDate, selectedType, searchType]);
 
-  useEffect(() => {
-    getTotalCount();
-  }, []);
-
-  const getTotalCount = async () => {
-    const count = await getTotalHistoryCount();
+  const getFilteredCount = async () => {
+    const count = await getFilteredHistoryCount(
+      debouncedKeyword,
+      { start: startDate, end: endDate },
+      selectedType,
+      searchType,
+    );
     setTotalHistoryCount(count);
+  };
+
+  const loadTimelineSummary = async () => {
+    try {
+      const summary = await getHistoryDateSummary(
+        debouncedKeyword,
+        { start: startDate, end: endDate },
+        selectedType,
+        searchType,
+      );
+      setTimelineItems(summary);
+      setActiveDateKey((prev) => {
+        if (summary.length === 0) return "";
+        if (prev && summary.some((item) => item.dateKey === prev)) return prev;
+        return summary[0].dateKey;
+      });
+    } catch (error) {
+      console.error("Failed to load timeline summary:", error);
+      setTimelineItems([]);
+    }
   };
 
   // Observer 只创建一次，通过 ref 访问最新状态
@@ -159,6 +230,145 @@ export const History: React.FC = () => {
     }
   }, []);
 
+  // 跟踪当前可视区域的日期分组
+  useEffect(() => {
+    headerObserverRef.current = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            const dateKey = (entry.target as HTMLElement).dataset.dateKey;
+            if (dateKey) setActiveDateKey(dateKey);
+          }
+        }
+      },
+      { rootMargin: "-60px 0px -80% 0px", threshold: 0 },
+    );
+
+    return () => {
+      headerObserverRef.current?.disconnect();
+    };
+  }, []);
+
+  // 注册/注销日期分组 header 的观察
+  const groupHeaderRef = useCallback((dateKey: string, node: HTMLDivElement | null) => {
+    if (node) {
+      groupRefs.current.set(dateKey, node);
+      headerObserverRef.current?.observe(node);
+    } else {
+      const prev = groupRefs.current.get(dateKey);
+      if (prev) headerObserverRef.current?.unobserve(prev);
+      groupRefs.current.delete(dateKey);
+    }
+  }, []);
+
+  useEffect(() => {
+    const pendingDateKey = pendingTimelineJumpRef.current;
+    if (!pendingDateKey) return;
+
+    const targetElement = groupRefs.current.get(pendingDateKey);
+    if (!targetElement) return;
+
+    pendingTimelineJumpRef.current = null;
+    requestAnimationFrame(() => {
+      targetElement.scrollIntoView({
+        behavior: "smooth",
+        block: isSidepanel ? "nearest" : "start",
+      });
+    });
+  }, [dateGroups, isSidepanel]);
+
+  const handleTimelineClick = useCallback(
+    (dateKey: string) => {
+      const scrollToDate = async () => {
+        setActiveDateKey(dateKey);
+
+        let targetElement = groupRefs.current.get(dateKey);
+        if (targetElement) {
+          targetElement.scrollIntoView({
+            behavior: "smooth",
+            block: isSidepanel ? "nearest" : "start",
+          });
+          return;
+        }
+
+        if (isTimelineJumpingRef.current) {
+          pendingTimelineJumpRef.current = dateKey;
+          return;
+        }
+
+        const summary = timelineItems.find((item) => item.dateKey === dateKey);
+        if (!summary) {
+          return;
+        }
+
+        pendingTimelineJumpRef.current = dateKey;
+        isTimelineJumpingRef.current = true;
+        setIsTimelineLoading(true);
+
+        try {
+          const response = await getHistoryFromViewAt(
+            summary.latestViewAt,
+            100,
+            debouncedKeyword,
+            { start: startDate, end: endDate },
+            selectedType,
+            searchType,
+          );
+
+          setHistory(response.items);
+          historyRef.current = response.items;
+          setHasMore(response.hasMore);
+          hasMoreRef.current = response.hasMore;
+
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => resolve());
+          });
+
+          targetElement = groupRefs.current.get(dateKey);
+          if (targetElement) {
+            pendingTimelineJumpRef.current = null;
+            targetElement.scrollIntoView({
+              behavior: "smooth",
+              block: isSidepanel ? "nearest" : "start",
+            });
+          }
+        } finally {
+          isTimelineJumpingRef.current = false;
+          setIsTimelineLoading(false);
+        }
+      };
+
+      void scrollToDate();
+    },
+    [debouncedKeyword, isSidepanel, searchType, selectedType, startDate, timelineItems],
+  );
+
+  const handleDelete = useCallback((item: HistoryItemType) => {
+    const itemDateKey = dayjs(item.view_at * 1000).format("YYYY-MM-DD");
+
+    setHistory((prev) => prev.filter((historyItem) => historyItem.id !== item.id));
+    setTotalHistoryCount((prev) => Math.max(0, prev - 1));
+    setTimelineItems((prev) => {
+      const next = prev
+        .map((timelineItem) =>
+          timelineItem.dateKey === itemDateKey
+            ? { ...timelineItem, count: timelineItem.count - 1 }
+            : timelineItem,
+        )
+        .filter((timelineItem) => timelineItem.count > 0);
+
+      setActiveDateKey((currentActiveDateKey) => {
+        if (next.length === 0) return "";
+        if (currentActiveDateKey !== itemDateKey) return currentActiveDateKey;
+        return next.some((timelineItem) => timelineItem.dateKey === currentActiveDateKey)
+          ? currentActiveDateKey
+          : next[0].dateKey;
+      });
+
+      return next;
+    });
+  }, []);
+
   const getLoadMoreText = () => {
     if (history.length === 0) {
       return keyword.trim() ? "没有找到匹配的历史记录" : "暂无历史记录";
@@ -167,14 +377,31 @@ export const History: React.FC = () => {
   };
 
   return (
-    <div>
-      <div className="sticky top-0 bg-white/95 backdrop-blur-sm z-20 border-b border-gray-100 shadow-sm transition-all duration-300">
-        <div className="flex flex-col md:flex-row items-center justify-between px-6 py-4 gap-4 max-w-[1600px] mx-auto">
+    <div className={isSidepanel ? "pb-4" : ""}>
+      <div
+        ref={toolbarRef}
+        className={`${isSidepanel ? "relative" : "sticky"} bg-white/95 backdrop-blur-sm z-20 border-b border-gray-100 shadow-sm transition-all duration-300`}
+        style={isSidepanel ? undefined : { top: `${stickyToolbarTop}px` }}
+      >
+        <div
+          className={`flex items-center justify-between gap-3 max-w-[1600px] mx-auto ${
+            isSidepanel ? "flex-col px-3 py-3" : "flex-col md:flex-row px-6 py-4 gap-4"
+          }`}
+        >
           {/* 左侧：统计与筛选 */}
-          <div className="flex items-center gap-4 w-full md:w-auto">
-            <span className="text-sm font-medium text-gray-500 bg-gray-50 px-3 py-1.5 rounded-full whitespace-nowrap border border-gray-100">
-              {totalHistoryCount} 条记录
-            </span>
+          <div
+            className={`flex items-center gap-3 ${isSidepanel ? "w-full justify-between" : "w-full md:w-auto"}`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-sm font-medium text-gray-500 bg-gray-50 px-3 py-1.5 rounded-full whitespace-nowrap border border-gray-100">
+                {totalHistoryCount} 条记录
+              </span>
+              {isTimelineLoading && (
+                <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2.5 py-1 rounded-full whitespace-nowrap border border-blue-100">
+                  时间跳转中...
+                </span>
+              )}
+            </div>
 
             <div className="relative">
               <button
@@ -216,7 +443,7 @@ export const History: React.FC = () => {
           </div>
 
           {/* 中间：搜索框 (带类型选择) */}
-          <div className="flex-1 w-full md:max-w-xl px-4">
+          <div className={`flex-1 w-full ${isSidepanel ? "" : "md:max-w-xl px-4"}`}>
             <div className="relative group w-full flex items-center bg-gray-50 border border-gray-200 rounded-full transition-all duration-300 shadow-sm hover:shadow-md focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100 focus-within:border-blue-400">
               {/* 搜索类型下拉 */}
               <div className="relative">
@@ -300,7 +527,11 @@ export const History: React.FC = () => {
           </div>
 
           {/* 右侧：日期、列数与刷新 */}
-          <div className="flex items-center gap-3 w-full md:w-auto justify-end">
+          <div
+            className={`flex items-center gap-3 w-full ${
+              isSidepanel ? "justify-between" : "md:w-auto justify-end"
+            }`}
+          >
             <DateRangePicker
               startDate={startDate}
               endDate={endDate}
@@ -309,37 +540,39 @@ export const History: React.FC = () => {
                 setEndDate(end);
               }}
               mode={dateSelectionMode}
+              compact={isSidepanel}
             />
 
             {/* 列数调节 */}
             {!isSidepanel && (
-            <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-full px-1 py-0.5">
-              <button
-                onClick={() => handleColumnChange(-1)}
-                disabled={gridColumns <= 2}
-                className="p-1 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                title="减少列数"
-              >
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <span className="text-xs font-medium text-gray-600 text-center tabular-nums whitespace-nowrap">
-                列数({gridColumns})
-              </span>
-              <button
-                onClick={() => handleColumnChange(1)}
-                disabled={gridColumns >= 8}
-                className="p-1 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                title="增加列数"
-              >
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            </div>
+              <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-full px-1 py-0.5">
+                <button
+                  onClick={() => handleColumnChange(-1)}
+                  disabled={gridColumns <= 2}
+                  className="p-1 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  title="减少列数"
+                >
+                  <Minus className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-xs font-medium text-gray-600 text-center tabular-nums whitespace-nowrap">
+                  列数({gridColumns})
+                </span>
+                <button
+                  onClick={() => handleColumnChange(1)}
+                  disabled={gridColumns >= 8}
+                  className="p-1 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  title="增加列数"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              </div>
             )}
 
             <button
               onClick={() => {
-                getTotalCount();
                 loadHistory(false);
+                loadTimelineSummary();
+                getFilteredCount();
               }}
               className={`p-2 bg-white text-gray-500 rounded-full hover:bg-blue-50 hover:text-blue-600 transition-all shadow-sm border border-gray-200 hover:border-blue-200 hover:rotate-180 duration-500 ${
                 isLoading ? "opacity-50 cursor-not-allowed" : ""
@@ -353,26 +586,48 @@ export const History: React.FC = () => {
         </div>
       </div>
 
-      <div
-        className="p-6 pt-2 grid gap-5 mx-auto w-full"
-        style={{
-          gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
-        }}
-      >
-        {history.map((item) => (
-          <HistoryItem
-            key={`${item.id}-${item.view_at}`}
-            item={item}
-            onDelete={() => {
-              setHistory((prev) => prev.filter((i) => i.id !== item.id));
-              setTotalHistoryCount((prev) => prev - 1);
-            }}
+      {/* 时间线 + 内容区域 */}
+      <div className="relative">
+        {timelineItems.length > 0 && (
+          <MiniTimeline
+            items={timelineItems}
+            activeDateKey={activeDateKey}
+            onDateClick={handleTimelineClick}
+            topOffset={timelineTopOffset}
           />
-        ))}
-        <div
-          ref={loadMoreCallbackRef}
-          className="col-span-full py-8 text-center text-gray-500 text-sm"
-        >
+        )}
+
+        <div className={isSidepanel ? "pr-12" : "pr-16"}>
+          {dateGroups.map((group) => (
+            <div key={group.dateKey}>
+              <div
+                ref={(node) => groupHeaderRef(group.dateKey, node)}
+                data-date-key={group.dateKey}
+                className="sticky bg-white/95 backdrop-blur-sm z-10 px-6 py-2 border-b border-gray-100"
+                style={{ top: `${groupHeaderTopOffset}px` }}
+              >
+                <span className="text-sm font-semibold text-gray-700">{group.label}</span>
+                <span className="text-xs text-gray-400 ml-2">{group.items.length} 条</span>
+              </div>
+              <div
+                className="p-6 pt-2 grid gap-5 mx-auto w-full"
+                style={{
+                  gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                }}
+              >
+                {group.items.map((item) => (
+                  <HistoryItem
+                    key={`${item.id}-${item.view_at}`}
+                    item={item}
+                    onDelete={() => handleDelete(item)}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div ref={loadMoreCallbackRef} className="py-8 text-center text-gray-500 text-sm">
           {getLoadMoreText()}
         </div>
       </div>

@@ -6,6 +6,12 @@ function App() {
   const [isSyncingFav, setIsSyncingFav] = useState(false);
   const [status, setStatus] = useState("");
   const [isFullSync, setIsFullSync] = useState(false);
+  const chromeApi = globalThis as typeof globalThis & {
+    chrome?: {
+      windows: { getCurrent: () => Promise<{ id?: number | null }> };
+      sidePanel: { open: (options: { windowId: number }) => Promise<void> };
+    };
+  };
 
   useEffect(() => {
     // 检查同步状态
@@ -83,9 +89,9 @@ function App() {
         <button
           className="w-full px-2 py-2 border border-[#00a1d6] text-[#00a1d6] bg-white rounded hover:bg-[#00a1d6] hover:text-white disabled:border-gray-300 disabled:text-gray-300 disabled:cursor-not-allowed"
           onClick={async () => {
-            const currentWindow = await chrome.windows.getCurrent();
-            if (currentWindow.id != null) {
-              await chrome.sidePanel.open({ windowId: currentWindow.id });
+            const currentWindow = await chromeApi.chrome?.windows.getCurrent();
+            if (currentWindow?.id != null) {
+              await chromeApi.chrome?.sidePanel.open({ windowId: currentWindow.id });
             }
             window.close();
           }}

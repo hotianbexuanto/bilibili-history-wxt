@@ -10,6 +10,7 @@ interface DateRangePickerProps {
   endDate: string;
   onChange: (start: string, end: string) => void;
   mode?: "range" | "single";
+  compact?: boolean;
 }
 
 export const DateRangePicker: React.FC<DateRangePickerProps> = ({
@@ -17,6 +18,7 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({
   endDate,
   onChange,
   mode = "range",
+  compact = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [currentMonth, setCurrentMonth] = useState(dayjs());
@@ -94,7 +96,9 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({
   return (
     <div className="relative" ref={containerRef}>
       <div
-        className="group relative flex items-center bg-gray-50 hover:bg-white border border-gray-200 rounded-lg transition-all focus-within:ring-2 focus-within:ring-blue-100 focus-within:border-blue-400 focus-within:bg-white shadow-sm cursor-pointer"
+        className={`group relative flex items-center bg-gray-50 hover:bg-white border border-gray-200 rounded-lg transition-all focus-within:ring-2 focus-within:ring-blue-100 focus-within:border-blue-400 focus-within:bg-white shadow-sm cursor-pointer ${
+          compact ? "min-w-0 flex-1" : ""
+        }`}
         onClick={() => setIsOpen(!isOpen)}
       >
         <div className="pl-3 flex items-center pointer-events-none">
@@ -104,7 +108,9 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({
           type="text"
           readOnly
           placeholder="yyyy/mm/dd"
-          className="bg-transparent border-none text-sm text-gray-600 focus:ring-0 py-1.5 pl-2 pr-1 outline-none w-[180px] cursor-pointer"
+          className={`bg-transparent border-none text-sm text-gray-600 focus:ring-0 py-1.5 pl-2 pr-1 outline-none cursor-pointer ${
+            compact ? "w-full min-w-0" : "w-[180px]"
+          }`}
           value={displayText}
         />
         {displayText && (

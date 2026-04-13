@@ -273,6 +273,134 @@ export const getTotalHistoryCount = async (): Promise<number> => {
   });
 };
 
+export interface HistoryDateSummaryItem {
+  dateKey: string;
+  count: number;
+  earliestViewAt: number;
+  latestViewAt: number;
+}
+
+const collectHistoryPage = (
+  request: IDBRequest<IDBCursorWithValue | null>,
+  pageSize: number,
+  keyword: string,
+  dateRange: { start: string; end: string } | null,
+  businessType: string,
+  searchType: "all" | "title" | "up" | "bvid" | "avid",
+): Promise<{ items: HistoryItem[]; hasMore: boolean }> => {
+  const items: HistoryItem[] = [];
+  let hasMore = false;
+
+  return new Promise((resolve, reject) => {
+    request.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest).result as IDBCursorWithValue | null;
+
+      if (cursor) {
+        const value = cursor.value as HistoryItem;
+
+        if (items.length < pageSize) {
+          if (matchCondition(value, keyword, dateRange, businessType, searchType)) {
+            items.push(value);
+          }
+          cursor.continue();
+        } else {
+          hasMore = true;
+          resolve({ items, hasMore });
+        }
+      } else {
+        resolve({ items, hasMore });
+      }
+    };
+
+    request.onerror = () => reject(request.error);
+  });
+};
+
+export const getFilteredHistoryCount = async (
+  keyword: string = "",
+  dateRange: { start: string; end: string } | null = null,
+  businessType: string = "",
+  searchType: "all" | "title" | "up" | "bvid" | "avid" = "all",
+): Promise<number> => {
+  const db = await openDB();
+  const tx = db.transaction("history", "readonly");
+  const store = tx.objectStore("history");
+  const index = store.index("view_at");
+  const request = index.openCursor(null, "prev");
+
+  return new Promise((resolve, reject) => {
+    let count = 0;
+
+    request.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest).result as IDBCursorWithValue | null;
+
+      if (!cursor) {
+        resolve(count);
+        return;
+      }
+
+      const value = cursor.value as HistoryItem;
+      if (matchCondition(value, keyword, dateRange, businessType, searchType)) {
+        count += 1;
+      }
+
+      cursor.continue();
+    };
+
+    request.onerror = () => reject(request.error);
+  });
+};
+
+export const getHistoryDateSummary = async (
+  keyword: string = "",
+  dateRange: { start: string; end: string } | null = null,
+  businessType: string = "",
+  searchType: "all" | "title" | "up" | "bvid" | "avid" = "all",
+): Promise<HistoryDateSummaryItem[]> => {
+  const db = await openDB();
+  const tx = db.transaction("history", "readonly");
+  const store = tx.objectStore("history");
+  const index = store.index("view_at");
+  const request = index.openCursor(null, "prev");
+
+  return new Promise((resolve, reject) => {
+    const summaryMap = new Map<string, HistoryDateSummaryItem>();
+
+    request.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest).result as IDBCursorWithValue | null;
+
+      if (!cursor) {
+        resolve(Array.from(summaryMap.values()));
+        return;
+      }
+
+      const value = cursor.value as HistoryItem;
+
+      if (matchCondition(value, keyword, dateRange, businessType, searchType)) {
+        const dateKey = dayjs(value.view_at * 1000).format("YYYY-MM-DD");
+        const existing = summaryMap.get(dateKey);
+
+        if (existing) {
+          existing.count += 1;
+          existing.earliestViewAt = Math.min(existing.earliestViewAt, value.view_at);
+          existing.latestViewAt = Math.max(existing.latestViewAt, value.view_at);
+        } else {
+          summaryMap.set(dateKey, {
+            dateKey,
+            count: 1,
+            earliestViewAt: value.view_at,
+            latestViewAt: value.view_at,
+          });
+        }
+      }
+
+      cursor.continue();
+    };
+
+    request.onerror = () => reject(request.error);
+  });
+};
+
 export const getHistory = async (
   lastViewTime: any = "",
   pageSize: number = 20,
@@ -293,41 +421,25 @@ export const getHistory = async (
 
   // 使用游标按view_at降序获取指定页的数据
   const request = index.openCursor(range, "prev");
-  const items: HistoryItem[] = [];
-  let hasMore = false;
+  return collectHistoryPage(request, pageSize, keyword, dateRange, businessType, searchType);
+};
 
-  return new Promise((resolve, reject) => {
-    request.onsuccess = (event) => {
-      const cursor = (event.target as IDBRequest).result as IDBCursorWithValue;
+export const getHistoryFromViewAt = async (
+  startViewTime: number,
+  pageSize: number = 100,
+  keyword: string = "",
+  dateRange: { start: string; end: string } | null = null,
+  businessType: string = "",
+  searchType: "all" | "title" | "up" | "bvid" | "avid" = "all",
+): Promise<{ items: HistoryItem[]; hasMore: boolean }> => {
+  const db = await openDB();
+  const tx = db.transaction("history", "readonly");
+  const store = tx.objectStore("history");
+  const index = store.index("view_at");
+  const range = IDBKeyRange.upperBound(startViewTime, false);
+  const request = index.openCursor(range, "prev");
 
-      if (cursor) {
-        const value = cursor.value as HistoryItem;
-
-        // 如果还没收集够数据，继续收集
-        if (items.length < pageSize) {
-          if (matchCondition(value, keyword, dateRange, businessType, searchType)) {
-            items.push(value);
-          }
-          cursor.continue();
-        } else {
-          // 已经收集够数据，检查是否还有更多
-          hasMore = true;
-          resolve({
-            items,
-            hasMore,
-          });
-        }
-      } else {
-        // 没有更多数据了
-        resolve({
-          items,
-          hasMore,
-        });
-      }
-    };
-
-    request.onerror = () => reject(request.error);
-  });
+  return collectHistoryPage(request, pageSize, keyword, dateRange, businessType, searchType);
 };
 
 export const deleteDB = () => {
