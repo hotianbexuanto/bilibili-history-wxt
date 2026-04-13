@@ -1,0 +1,122 @@
+name: Build And Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag. Leave empty to use v<package.json version>
+        required: false
+        type: string
+      release_name:
+        description: Release title. Leave empty to use tag name
+        required: false
+        type: string
+      prerelease:
+        description: Mark this release as prerelease
+        required: false
+        default: false
+        type: boolean
+      release_notes:
+        description: Optional release notes shown on GitHub release
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        run: pnpm compile
+
+      - name: Build Chrome extension
+        run: pnpm build
+
+      - name: Build Firefox extension
+        run: pnpm build:firefox
+
+      - name: Package Chrome extension
+        run: pnpm zip
+
+      - name: Package Firefox extension
+        run: pnpm zip:firefox
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          DEFAULT_TAG="v${PACKAGE_VERSION}"
+          TAG_NAME="${{ inputs.tag_name }}"
+          RELEASE_NAME="${{ inputs.release_name }}"
+
+          if [ -z "$TAG_NAME" ]; then
+            TAG_NAME="$DEFAULT_TAG"
+          fi
+
+          if [ -z "$RELEASE_NAME" ]; then
+            RELEASE_NAME="$TAG_NAME"
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+          echo "package_version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Collect release assets
+        id: assets
+        shell: bash
+        run: |
+          mapfile -t ZIP_FILES < <(find .output -type f -name '*.zip' | sort)
+
+          if [ ${#ZIP_FILES[@]} -eq 0 ]; then
+            echo "No zip artifacts found in .output" >&2
+            exit 1
+          fi
+
+          {
+            echo 'files<<EOF'
+            printf '%s\n' "${ZIP_FILES[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: ${{ inputs.release_notes == '' }}
+          body: ${{ inputs.release_notes }}
+          files: ${{ steps.assets.outputs.files }}
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ steps.meta.outputs.tag_name }}
+          path: |
+            .output/**/*.zip
+          if-no-files-found: error
