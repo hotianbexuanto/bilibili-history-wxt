@@ -442,6 +442,46 @@ export const getHistoryFromViewAt = async (
   return collectHistoryPage(request, pageSize, keyword, dateRange, businessType, searchType);
 };
 
+export const getHistoryNewerThan = async (
+  viewTime: number,
+  pageSize: number = 100,
+  keyword: string = "",
+  dateRange: { start: string; end: string } | null = null,
+  businessType: string = "",
+  searchType: "all" | "title" | "up" | "bvid" | "avid" = "all",
+): Promise<{ items: HistoryItem[]; hasMore: boolean }> => {
+  const db = await openDB();
+  const tx = db.transaction("history", "readonly");
+  const store = tx.objectStore("history");
+  const index = store.index("view_at");
+  const range = IDBKeyRange.lowerBound(viewTime, true);
+  const request = index.openCursor(range, "next");
+  const ascendingItems: HistoryItem[] = [];
+
+  return new Promise((resolve, reject) => {
+    request.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest).result as IDBCursorWithValue | null;
+
+      if (cursor) {
+        const value = cursor.value as HistoryItem;
+
+        if (ascendingItems.length < pageSize) {
+          if (matchCondition(value, keyword, dateRange, businessType, searchType)) {
+            ascendingItems.push(value);
+          }
+          cursor.continue();
+        } else {
+          resolve({ items: ascendingItems.reverse(), hasMore: true });
+        }
+      } else {
+        resolve({ items: ascendingItems.reverse(), hasMore: false });
+      }
+    };
+
+    request.onerror = () => reject(request.error);
+  });
+};
+
 export const deleteDB = () => {
   return new Promise<void>((resolve, reject) => {
     const request = indexedDB.deleteDatabase(DB_CONFIG.name);

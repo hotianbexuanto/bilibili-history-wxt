@@ -5,6 +5,7 @@ import {
   getHistory,
   getHistoryDateSummary,
   getHistoryFromViewAt,
+  getHistoryNewerThan,
   HistoryDateSummaryItem,
 } from "../utils/db";
 import { HistoryItem as HistoryItemType } from "../utils/types";
@@ -40,13 +41,20 @@ export const History: React.FC = () => {
   const [dateSelectionMode, setDateSelectionMode] = useState<"range" | "single">("range");
   const [gridColumns, setGridColumns] = useState(isSidepanel ? 1 : 4);
   const [toolbarHeight, setToolbarHeight] = useState(isSidepanel ? 120 : 96);
+  const [sidepanelTimelineTopOffset, setSidepanelTimelineTopOffset] = useState(
+    SIDEPANEL_NAV_HEIGHT + 120,
+  );
   const [isTimelineLoading, setIsTimelineLoading] = useState(false);
+  const [hasNewer, setHasNewer] = useState(false);
 
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const loadPreviousRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
+  const previousObserverRef = useRef<IntersectionObserver | null>(null);
   const isLoadingRef = useRef<boolean>(false);
   const historyRef = useRef<HistoryItemType[]>([]);
   const hasMoreRef = useRef(true);
+  const hasNewerRef = useRef(false);
   const [activeDateKey, setActiveDateKey] = useState("");
   const groupRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const headerObserverRef = useRef<IntersectionObserver | null>(null);
@@ -56,12 +64,34 @@ export const History: React.FC = () => {
 
   const dateGroups = useMemo(() => groupByDate(history), [history]);
   const stickyToolbarTop = isSidepanel ? SIDEPANEL_NAV_HEIGHT : 0;
-  const timelineTopOffset = isSidepanel ? SIDEPANEL_NAV_HEIGHT : toolbarHeight;
+  const timelineTopOffset = isSidepanel ? sidepanelTimelineTopOffset : toolbarHeight;
   const groupHeaderTopOffset = isSidepanel ? 0 : timelineTopOffset;
 
   useEffect(() => {
     historyRef.current = history;
   }, [history]);
+
+  useEffect(() => {
+    const handleScrollToTopRequest = () => {
+      pendingTimelineJumpRef.current = null;
+      isTimelineJumpingRef.current = false;
+      setIsTimelineLoading(false);
+      setHasNewer(false);
+      hasNewerRef.current = false;
+      setHasMore(true);
+      hasMoreRef.current = true;
+      void loadHistoryRef.current(false);
+    };
+
+    window.addEventListener("history:scroll-to-top-request", handleScrollToTopRequest);
+    return () => {
+      window.removeEventListener("history:scroll-to-top-request", handleScrollToTopRequest);
+    };
+  }, []);
+
+  useEffect(() => {
+    hasNewerRef.current = hasNewer;
+  }, [hasNewer]);
 
   useLayoutEffect(() => {
     const toolbar = toolbarRef.current;
@@ -69,6 +99,11 @@ export const History: React.FC = () => {
 
     const updateToolbarHeight = () => {
       setToolbarHeight(toolbar.offsetHeight);
+
+      if (isSidepanel) {
+        const toolbarBottom = toolbar.getBoundingClientRect().bottom;
+        setSidepanelTimelineTopOffset(Math.max(SIDEPANEL_NAV_HEIGHT, Math.round(toolbarBottom)));
+      }
     };
 
     updateToolbarHeight();
@@ -79,10 +114,12 @@ export const History: React.FC = () => {
 
     resizeObserver.observe(toolbar);
     window.addEventListener("resize", updateToolbarHeight);
+    window.addEventListener("scroll", updateToolbarHeight, { passive: true });
 
     return () => {
       resizeObserver.disconnect();
       window.removeEventListener("resize", updateToolbarHeight);
+      window.removeEventListener("scroll", updateToolbarHeight);
     };
   }, [isSidepanel]);
 
@@ -140,6 +177,8 @@ export const History: React.FC = () => {
       } else {
         setHistory(items);
         window.scrollTo({ top: 0, behavior: "smooth" });
+        setHasNewer(false);
+        hasNewerRef.current = false;
       }
 
       setHasMore(hasMore);
@@ -219,6 +258,29 @@ export const History: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    previousObserverRef.current = new IntersectionObserver(
+      (entries) => {
+        const [entry] = entries;
+        if (entry.isIntersecting && hasNewerRef.current && !isLoadingRef.current) {
+          void loadPreviousHistory();
+        }
+      },
+      {
+        threshold: 0.1,
+        rootMargin: "200px",
+      },
+    );
+
+    if (loadPreviousRef.current) {
+      previousObserverRef.current.observe(loadPreviousRef.current);
+    }
+
+    return () => {
+      previousObserverRef.current?.disconnect();
+    };
+  }, []);
+
   // callback ref：loadMore div 挂载/卸载时自动 observe/unobserve
   const loadMoreCallbackRef = useCallback((node: HTMLDivElement | null) => {
     if (loadMoreRef.current && observerRef.current) {
@@ -229,6 +291,66 @@ export const History: React.FC = () => {
       observerRef.current.observe(node);
     }
   }, []);
+
+  const loadPreviousCallbackRef = useCallback((node: HTMLDivElement | null) => {
+    if (loadPreviousRef.current && previousObserverRef.current) {
+      previousObserverRef.current.unobserve(loadPreviousRef.current);
+    }
+    loadPreviousRef.current = node;
+    if (node && previousObserverRef.current) {
+      previousObserverRef.current.observe(node);
+    }
+  }, []);
+
+  const loadPreviousHistory = async () => {
+    if (isLoadingRef.current || !hasNewerRef.current || historyRef.current.length === 0) {
+      return;
+    }
+
+    const firstVisibleItem = historyRef.current[0];
+    if (!firstVisibleItem) return;
+
+    try {
+      setIsLoading(true);
+      isLoadingRef.current = true;
+
+      const previousScrollHeight = document.documentElement.scrollHeight;
+      const previousScrollTop = window.scrollY;
+
+      const response = await getHistoryNewerThan(
+        firstVisibleItem.view_at,
+        40,
+        debouncedKeyword,
+        { start: startDate, end: endDate },
+        selectedType,
+        searchType,
+      );
+
+      if (response.items.length > 0) {
+        setHistory((prev) => {
+          const next = [...response.items, ...prev].filter(
+            (item, index, items) =>
+              index === items.findIndex((candidate) => candidate.id === item.id),
+          );
+          historyRef.current = next;
+          return next;
+        });
+
+        requestAnimationFrame(() => {
+          const nextScrollHeight = document.documentElement.scrollHeight;
+          window.scrollTo({ top: previousScrollTop + (nextScrollHeight - previousScrollHeight) });
+        });
+      }
+
+      setHasNewer(response.hasMore);
+      hasNewerRef.current = response.hasMore;
+    } catch (error) {
+      console.error("Failed to load previous history:", error);
+    } finally {
+      setIsLoading(false);
+      isLoadingRef.current = false;
+    }
+  };
 
   // 跟踪当前可视区域的日期分组
   useEffect(() => {
@@ -270,12 +392,15 @@ export const History: React.FC = () => {
 
     pendingTimelineJumpRef.current = null;
     requestAnimationFrame(() => {
-      targetElement.scrollIntoView({
+      const topOffset = isSidepanel ? SIDEPANEL_NAV_HEIGHT : timelineTopOffset;
+      const targetTop = targetElement.getBoundingClientRect().top + window.scrollY - topOffset;
+
+      window.scrollTo({
+        top: Math.max(0, targetTop),
         behavior: "smooth",
-        block: isSidepanel ? "nearest" : "start",
       });
     });
-  }, [dateGroups, isSidepanel]);
+  }, [dateGroups, isSidepanel, timelineTopOffset]);
 
   const handleTimelineClick = useCallback(
     (dateKey: string) => {
@@ -284,9 +409,12 @@ export const History: React.FC = () => {
 
         let targetElement = groupRefs.current.get(dateKey);
         if (targetElement) {
-          targetElement.scrollIntoView({
+          const topOffset = isSidepanel ? SIDEPANEL_NAV_HEIGHT : timelineTopOffset;
+          const targetTop = targetElement.getBoundingClientRect().top + window.scrollY - topOffset;
+
+          window.scrollTo({
+            top: Math.max(0, targetTop),
             behavior: "smooth",
-            block: isSidepanel ? "nearest" : "start",
           });
           return;
         }
@@ -306,19 +434,39 @@ export const History: React.FC = () => {
         setIsTimelineLoading(true);
 
         try {
-          const response = await getHistoryFromViewAt(
-            summary.latestViewAt,
-            100,
-            debouncedKeyword,
-            { start: startDate, end: endDate },
-            selectedType,
-            searchType,
+          const pageSize = 100;
+          const newerPageSize = Math.max(20, Math.floor(pageSize * 0.35));
+          const olderPageSize = pageSize - newerPageSize;
+          const [newerResponse, olderResponse] = await Promise.all([
+            getHistoryNewerThan(
+              summary.latestViewAt,
+              newerPageSize,
+              debouncedKeyword,
+              { start: startDate, end: endDate },
+              selectedType,
+              searchType,
+            ),
+            getHistoryFromViewAt(
+              summary.latestViewAt,
+              olderPageSize,
+              debouncedKeyword,
+              { start: startDate, end: endDate },
+              selectedType,
+              searchType,
+            ),
+          ]);
+
+          const mergedItems = [...newerResponse.items, ...olderResponse.items].filter(
+            (item, index, items) =>
+              index === items.findIndex((candidate) => candidate.id === item.id),
           );
 
-          setHistory(response.items);
-          historyRef.current = response.items;
-          setHasMore(response.hasMore);
-          hasMoreRef.current = response.hasMore;
+          setHistory(mergedItems);
+          historyRef.current = mergedItems;
+          setHasNewer(newerResponse.hasMore);
+          hasNewerRef.current = newerResponse.hasMore;
+          setHasMore(olderResponse.hasMore);
+          hasMoreRef.current = olderResponse.hasMore;
 
           await new Promise<void>((resolve) => {
             requestAnimationFrame(() => resolve());
@@ -327,9 +475,13 @@ export const History: React.FC = () => {
           targetElement = groupRefs.current.get(dateKey);
           if (targetElement) {
             pendingTimelineJumpRef.current = null;
-            targetElement.scrollIntoView({
+            const topOffset = isSidepanel ? SIDEPANEL_NAV_HEIGHT : timelineTopOffset;
+            const targetTop =
+              targetElement.getBoundingClientRect().top + window.scrollY - topOffset;
+
+            window.scrollTo({
+              top: Math.max(0, targetTop),
               behavior: "smooth",
-              block: isSidepanel ? "nearest" : "start",
             });
           }
         } finally {
@@ -340,7 +492,15 @@ export const History: React.FC = () => {
 
       void scrollToDate();
     },
-    [debouncedKeyword, isSidepanel, searchType, selectedType, startDate, timelineItems],
+    [
+      debouncedKeyword,
+      isSidepanel,
+      searchType,
+      selectedType,
+      startDate,
+      timelineItems,
+      timelineTopOffset,
+    ],
   );
 
   const handleDelete = useCallback((item: HistoryItemType) => {
@@ -598,6 +758,7 @@ export const History: React.FC = () => {
         )}
 
         <div className={isSidepanel ? "pr-12" : "pr-16"}>
+          <div ref={loadPreviousCallbackRef} className="h-1" />
           {dateGroups.map((group) => (
             <div key={group.dateKey}>
               <div

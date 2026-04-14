@@ -4,6 +4,7 @@ const ScrollToTopButton = () => {
   const [isVisible, setIsVisible] = useState(false);
 
   const handleBackToTop = () => {
+    window.dispatchEvent(new CustomEvent("history:scroll-to-top-request"));
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
