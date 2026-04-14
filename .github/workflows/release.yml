@@ -103,6 +103,24 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Collect release artifacts
+        id: release_artifacts
+        shell: bash
+        run: |
+          mapfile -t ARTIFACT_FILES < <(find .output -type f \( -name '*.zip' -o -name 'manifest.json' \) | sort)
+
+          if [ ${#ARTIFACT_FILES[@]} -eq 0 ]; then
+            echo "No release artifacts found in .output" >&2
+            find .output -maxdepth 3 -type f | sort || true
+            exit 1
+          fi
+
+          {
+            echo 'files<<EOF'
+            printf '%s\n' "${ARTIFACT_FILES[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -117,6 +135,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-artifacts-${{ steps.meta.outputs.tag_name }}
-          path: |
-            .output/**/*.zip
+          path: ${{ steps.release_artifacts.outputs.files }}
           if-no-files-found: error

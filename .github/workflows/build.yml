@@ -45,12 +45,27 @@ jobs:
       - name: Package Firefox extension
         run: pnpm zip:firefox
 
+      - name: Collect build artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          mapfile -t ARTIFACT_FILES < <(find .output -type f \( -name '*.zip' -o -name 'manifest.json' \) | sort)
+
+          if [ ${#ARTIFACT_FILES[@]} -eq 0 ]; then
+            echo "No build artifacts found in .output" >&2
+            find .output -maxdepth 3 -type f | sort || true
+            exit 1
+          fi
+
+          {
+            echo 'files<<EOF'
+            printf '%s\n' "${ARTIFACT_FILES[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: extension-build-artifacts
-          path: |
-            .output/**/*.zip
-            .output/chrome-mv3/**
-            .output/firefox-mv2/**
+          path: ${{ steps.artifacts.outputs.files }}
           if-no-files-found: error
