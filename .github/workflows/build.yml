@@ -36,11 +36,17 @@ jobs:
       - name: Build Chrome extension
         run: pnpm build
 
+      - name: Build Edge extension
+        run: pnpm build -b edge
+
       - name: Build Firefox extension
         run: pnpm build:firefox
 
       - name: Package Chrome extension
         run: pnpm zip
+
+      - name: Package Edge extension
+        run: pnpm zip -b edge
 
       - name: Package Firefox extension
         run: pnpm zip:firefox
